@@ -1,0 +1,23 @@
+{$AAW_ADMIN_SITE_ADDRESS:http://localhost} {
+	encode zstd gzip
+
+	# 管理サイトは検索エンジンに絶対にインデックスさせない。
+	header X-Robots-Tag "noindex, nofollow, noarchive"
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		# HTTPSを強制する（ブラウザに1年間記憶させ、サブドメインにも適用）。
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		# 管理サイトは自ドメインのスクリプト・スタイルのみで完結させる。
+		# Next.jsの開発モードや一部ライブラリがinline styleを使うため style-src だけ 'unsafe-inline' を許容。
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+	}
+}

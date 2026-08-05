@@ -1,0 +1,487 @@
+// Anchor Art Works Admin — Prismaスキーマ
+// 命名規則: モデル名はPascalCase、テーブル名(@@map)は指示書のsnake_caseに合わせる。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 認証・管理者
+// ============================================================
+
+/// 管理者アカウント（許可リスト）。パスワード・TOTPシークレットは常にハッシュ/暗号化して保存する。
+model Administrator {
+  id                  String            @id @default(cuid())
+  email               String            @unique
+  displayName         String            @map("display_name")
+  passwordHash        String            @map("password_hash")
+  /// TOTPシークレットは暗号化して保存し、画面へ再表示しない。
+  totpSecretEncrypted String?           @map("totp_secret_encrypted")
+  mfaEnabledAt        DateTime?         @map("mfa_enabled_at")
+  role                AdministratorRole @default(OPERATOR)
+  isActive            Boolean           @default(true) @map("is_active")
+  lastLoginAt         DateTime?         @map("last_login_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @updatedAt @map("updated_at")
+
+  sessions         AdminSession[]
+  loginAttempts    LoginAttempt[]
+  auditLogs        AdminAuditLog[]
+  announcements    Announcement[]
+  contentSnapshots ContentChannelSnapshot[]
+  aiInsights       AiInsight[]
+
+  @@map("administrators")
+}
+
+enum AdministratorRole {
+  OWNER
+  OPERATOR
+}
+
+/// ログインセッション。短いTTL＋アイドルタイムアウトはアプリ側で判定する。
+model AdminSession {
+  id              String        @id @default(cuid())
+  administratorId String        @map("administrator_id")
+  administrator   Administrator @relation(fields: [administratorId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now()) @map("created_at")
+  lastSeenAt      DateTime      @default(now()) @map("last_seen_at")
+  expiresAt       DateTime      @map("expires_at")
+  revokedAt       DateTime?     @map("revoked_at")
+  ipAddress       String?       @map("ip_address")
+  userAgent       String?       @map("user_agent")
+
+  @@index([administratorId, revokedAt])
+  @@map("admin_sessions")
+}
+
+/// ログイン試行制限用。成功・失敗の両方を記録する。
+model LoginAttempt {
+  id              String         @id @default(cuid())
+  email           String
+  succeeded       Boolean        @default(false)
+  ipAddress       String?        @map("ip_address")
+  attemptedAt     DateTime       @default(now()) @map("attempted_at")
+  administratorId String?        @map("administrator_id")
+  administrator   Administrator? @relation(fields: [administratorId], references: [id], onDelete: SetNull)
+
+  @@index([email, attemptedAt])
+  @@map("login_attempts")
+}
+
+// ============================================================
+// サービス（PDC Cleaner等、複数サービスを横断管理）
+// ============================================================
+
+model Service {
+  id            String        @id @default(cuid())
+  slug          String        @unique
+  name          String
+  publicUrl     String        @map("public_url")
+  status        ServiceStatus @default(UNKNOWN)
+  lastSyncedAt  DateTime?     @map("last_synced_at")
+  lastSyncError String?       @map("last_sync_error")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  integrations          ServiceIntegration[]
+  userSnapshots         ServiceUserSnapshot[]
+  subscriptionSnapshots SubscriptionSnapshot[]
+  paymentTransactions   PaymentTransaction[]
+  revenueSnapshots      RevenueSnapshot[]
+  webhookEvents         WebhookEvent[]
+  jobRuns               JobRun[]
+  announcementAudiences AnnouncementAudience[]
+  notificationConsents  NotificationConsent[]
+
+  @@map("services")
+}
+
+enum ServiceStatus {
+  OPERATIONAL
+  DEGRADED
+  DOWN
+  UNKNOWN
+}
+
+/// サービスごとの外部連携設定。シークレットの値そのものは保存せず、設定済みフラグ＋末尾数文字のみ保持する。
+model ServiceIntegration {
+  id              String            @id @default(cuid())
+  serviceId       String            @map("service_id")
+  service         Service           @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  kind            IntegrationKind
+  isConfigured    Boolean           @default(false) @map("is_configured")
+  /// 表示用の末尾4文字程度のみ（例: "...ab12"）。実値は環境変数/secrets managerで管理する。
+  maskedValueHint String?           @map("masked_value_hint")
+  lastCheckedAt   DateTime?         @map("last_checked_at")
+  lastStatus      IntegrationStatus @default(UNKNOWN) @map("last_status")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  @@unique([serviceId, kind])
+  @@map("service_integrations")
+}
+
+enum IntegrationKind {
+  STRIPE
+  PAYPAL
+  SMTP
+  INTERNAL_API
+}
+
+enum IntegrationStatus {
+  OK
+  WARNING
+  ERROR
+  UNKNOWN
+}
+
+// ============================================================
+// 利用者・契約（各サービスからの読み取り専用スナップショット）
+// ============================================================
+
+/// 各サービスの利用者を管理サイト側でミラーした読み取り専用スナップショット。
+/// パスワード・カード番号・音声ファイル等は一切保持しない。
+model ServiceUserSnapshot {
+  id                String    @id @default(cuid())
+  serviceId         String    @map("service_id")
+  service           Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  /// サービス側のuser_id（外部キーとして保持するが、管理サイトからは書き込まない）
+  externalUserId    String    @map("external_user_id")
+  emailMasked       String    @map("email_masked")
+  currentPlan       String    @map("current_plan")
+  contractStatus    String    @map("contract_status")
+  registeredAt      DateTime? @map("registered_at")
+  lastActiveAt      DateTime? @map("last_active_at")
+  currentMonthUsage Float?    @map("current_month_usage")
+  paymentProvider   String?   @map("payment_provider")
+  syncedAt          DateTime  @default(now()) @map("synced_at")
+
+  subscriptionSnapshots SubscriptionSnapshot[]
+
+  @@unique([serviceId, externalUserId])
+  @@index([serviceId, contractStatus])
+  @@map("service_user_snapshots")
+}
+
+model SubscriptionSnapshot {
+  id                    String              @id @default(cuid())
+  serviceId             String              @map("service_id")
+  service               Service             @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  serviceUserSnapshotId String              @map("service_user_snapshot_id")
+  serviceUserSnapshot   ServiceUserSnapshot @relation(fields: [serviceUserSnapshotId], references: [id], onDelete: Cascade)
+  plan                  String
+  status                String
+  paymentProvider       String              @map("payment_provider")
+  currentPeriodEnd      DateTime?           @map("current_period_end")
+  syncedAt              DateTime            @default(now()) @map("synced_at")
+
+  @@index([serviceId, status])
+  @@map("subscription_snapshots")
+}
+
+// ============================================================
+// 売上（Stripe / PayPal 共通形式。原本は raw_response に無加工保存）
+// ============================================================
+
+model PaymentTransaction {
+  id                String          @id @default(cuid())
+  serviceId         String          @map("service_id")
+  service           Service         @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  provider          PaymentProvider
+  externalPaymentId String          @map("external_payment_id")
+  emailMasked       String          @map("email_masked")
+  plan              String?
+  grossAmount       Int             @map("gross_amount")
+  feeAmount         Int             @default(0) @map("fee_amount")
+  refundAmount      Int             @default(0) @map("refund_amount")
+  netAmount         Int             @map("net_amount")
+  currency          String
+  status            String
+  occurredAt        DateTime        @map("occurred_at")
+  /// 決済会社APIの原本レスポンス（改変せず保存。個人情報は最小限に留める）
+  rawResponse       Json            @map("raw_response")
+  syncedAt          DateTime        @default(now()) @map("synced_at")
+
+  @@unique([provider, externalPaymentId])
+  @@index([serviceId, occurredAt])
+  @@map("payment_transactions")
+}
+
+enum PaymentProvider {
+  STRIPE
+  PAYPAL
+}
+
+/// 集計キャッシュ。あくまで参考値であり、正式な会計データはStripe/PayPal側を正とする。
+model RevenueSnapshot {
+  id                String           @id @default(cuid())
+  serviceId         String           @map("service_id")
+  service           Service          @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  periodKey         String           @map("period_key")
+  provider          PaymentProvider?
+  grossRevenue      Int              @map("gross_revenue")
+  feeTotal          Int              @map("fee_total")
+  refundTotal       Int              @map("refund_total")
+  netRevenue        Int              @map("net_revenue")
+  mrr               Int?
+  newContracts      Int              @default(0) @map("new_contracts")
+  canceledContracts Int              @default(0) @map("canceled_contracts")
+  syncedAt          DateTime         @default(now()) @map("synced_at")
+  syncError         String?          @map("sync_error")
+
+  @@unique([serviceId, periodKey, provider])
+  @@map("revenue_snapshots")
+}
+
+// ============================================================
+// お知らせ・配信
+// ============================================================
+
+model Announcement {
+  id               String               @id @default(cuid())
+  title            String
+  body             String
+  category         AnnouncementCategory
+  status           AnnouncementStatus   @default(DRAFT)
+  createdById      String               @map("created_by_id")
+  createdBy        Administrator        @relation(fields: [createdById], references: [id])
+  scheduledAt      DateTime?            @map("scheduled_at")
+  sentAt           DateTime?            @map("sent_at")
+  canceledAt       DateTime?            @map("canceled_at")
+  duplicatedFromId String?              @map("duplicated_from_id")
+  createdAt        DateTime             @default(now()) @map("created_at")
+  updatedAt        DateTime             @updatedAt @map("updated_at")
+
+  audiences  AnnouncementAudience[]
+  deliveries NotificationDelivery[]
+
+  @@map("announcements")
+}
+
+enum AnnouncementCategory {
+  CRITICAL
+  MARKETING
+}
+
+enum AnnouncementStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELED
+  FAILED
+}
+
+/// 配信対象条件（サービス／プラン／契約状態／登録期間／全利用者／個別利用者）
+model AnnouncementAudience {
+  id                        String       @id @default(cuid())
+  announcementId            String       @map("announcement_id")
+  announcement              Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  serviceId                 String?      @map("service_id")
+  service                   Service?     @relation(fields: [serviceId], references: [id])
+  planFilter                String?      @map("plan_filter")
+  statusFilter              String?      @map("status_filter")
+  registeredSince           DateTime?    @map("registered_since")
+  registeredUntil           DateTime?    @map("registered_until")
+  targetAllUsers            Boolean      @default(false) @map("target_all_users")
+  individualExternalUserIds Json?        @map("individual_external_user_ids")
+
+  @@map("announcement_audiences")
+}
+
+/// マーケティングメールの同意記録。同意・停止要求は最低3年間保存する。
+model NotificationConsent {
+  id             String    @id @default(cuid())
+  serviceId      String    @map("service_id")
+  service        Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  externalUserId String    @map("external_user_id")
+  emailMasked    String    @map("email_masked")
+  consented      Boolean
+  consentedAt    DateTime? @map("consented_at")
+  consentSource  String?   @map("consent_source")
+  unsubscribedAt DateTime? @map("unsubscribed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@unique([serviceId, externalUserId])
+  @@map("notification_consents")
+}
+
+model NotificationDelivery {
+  id             String          @id @default(cuid())
+  announcementId String          @map("announcement_id")
+  announcement   Announcement    @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  channel        DeliveryChannel
+  targetCount    Int             @map("target_count")
+  successCount   Int             @default(0) @map("success_count")
+  failureCount   Int             @default(0) @map("failure_count")
+  openCount      Int             @default(0) @map("open_count")
+  status         DeliveryStatus  @default(PENDING)
+  startedAt      DateTime?       @map("started_at")
+  finishedAt     DateTime?       @map("finished_at")
+  /// 失敗原因の要約のみ保持し、メールアドレス等の個人情報は含めない。
+  failureSummary String?         @map("failure_summary")
+
+  @@map("notification_deliveries")
+}
+
+enum DeliveryChannel {
+  IN_APP
+  EMAIL
+}
+
+enum DeliveryStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+// ============================================================
+// システム監視
+// ============================================================
+
+model WebhookEvent {
+  id                String          @id @default(cuid())
+  serviceId         String          @map("service_id")
+  service           Service         @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  provider          PaymentProvider
+  lastReceivedAt    DateTime?       @map("last_received_at")
+  failureCount      Int             @default(0) @map("failure_count")
+  lastFailureAt     DateTime?       @map("last_failure_at")
+  lastFailureReason String?         @map("last_failure_reason")
+
+  @@unique([serviceId, provider])
+  @@map("webhook_events")
+}
+
+model JobRun {
+  id         String       @id @default(cuid())
+  serviceId  String       @map("service_id")
+  service    Service      @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  jobName    String       @map("job_name")
+  status     JobRunStatus
+  startedAt  DateTime     @map("started_at")
+  finishedAt DateTime?    @map("finished_at")
+  detail     String?
+
+  @@index([serviceId, jobName, startedAt])
+  @@map("job_runs")
+}
+
+enum JobRunStatus {
+  SUCCESS
+  FAILURE
+  RUNNING
+}
+
+// ============================================================
+// 監査ログ（追記専用。DB権限でUPDATE/DELETEを剥奪すること）
+// ============================================================
+
+model AdminAuditLog {
+  id              String         @id @default(cuid())
+  administratorId String?        @map("administrator_id")
+  administrator   Administrator? @relation(fields: [administratorId], references: [id], onDelete: SetNull)
+  action          String
+  targetType      String?        @map("target_type")
+  targetId        String?        @map("target_id")
+  detail          Json?
+  ipAddress       String?        @map("ip_address")
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  @@index([administratorId, createdAt])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
+}
+
+// ============================================================
+// コンテンツ（Podcast/YouTube/Instagram/TikTok）
+// 数値はAPI連携ではなく、必要なタイミングで手動記録する
+// （各社ダッシュボードの認証情報は保存しない）。
+// ============================================================
+
+model ContentChannel {
+  id        String          @id @default(cuid())
+  platform  ContentPlatform
+  name      String
+  handle    String?
+  publicUrl String          @map("public_url")
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+
+  snapshots ContentChannelSnapshot[]
+
+  @@unique([platform, handle])
+  @@map("content_channels")
+}
+
+enum ContentPlatform {
+  PODCAST_SPOTIFY
+  YOUTUBE
+  INSTAGRAM
+  TIKTOK
+}
+
+/// 手動記録スナップショット。フォロワー等の累計値と、直近期間の再生・エンゲージメントを保持する。
+model ContentChannelSnapshot {
+  id           String         @id @default(cuid())
+  channelId    String         @map("channel_id")
+  channel      ContentChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  capturedAt   DateTime       @default(now()) @map("captured_at")
+  /// 登録者数・フォロワー数など累計値
+  followers    Int?
+  /// 直近期間の再生・視聴・インプレッション数
+  periodViews  Int?           @map("period_views")
+  /// 直近期間のいいね・保存等のエンゲージメント数
+  periodLikes  Int?           @map("period_likes")
+  note         String?
+  recordedById String?        @map("recorded_by_id")
+  recordedBy   Administrator? @relation(fields: [recordedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  @@index([channelId, capturedAt])
+  @@map("content_channel_snapshots")
+}
+
+// ============================================================
+// 通知（要確認事項をSlack/メールへ送信した記録。重複送信防止に使う）
+// ============================================================
+
+model IssueNotification {
+  id            String   @id @default(cuid())
+  /// 送信時点の要確認事項一覧のハッシュ（同じ内容の再送を防ぐ）
+  issuesHash    String   @map("issues_hash")
+  issuesSummary String   @map("issues_summary")
+  channelsSent  String[] @map("channels_sent")
+  sentAt        DateTime @default(now()) @map("sent_at")
+
+  @@index([issuesHash, sentAt])
+  @@map("issue_notifications")
+}
+
+// ============================================================
+// AI売上戦略アドバイス（Claude APIへ現在のKPIを渡して生成。都度の課金を避けるため生成結果を保存する）
+// ============================================================
+
+model AiInsight {
+  id            String         @id @default(cuid())
+  /// 生成対象の年月（YYYY-MM）。同じ月に再生成した場合は新しい行を追加する。
+  periodKey     String         @map("period_key")
+  content       String
+  /// 生成時にプロンプトへ含めたKPIデータ（再現性の確認・デバッグ用）
+  promptContext Json           @map("prompt_context")
+  generatedById String?        @map("generated_by_id")
+  generatedBy   Administrator? @relation(fields: [generatedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  @@index([periodKey, createdAt])
+  @@map("ai_insights")
+}
