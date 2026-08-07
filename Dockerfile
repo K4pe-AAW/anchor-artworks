@@ -12,7 +12,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/src/generated ./src/generated
 COPY . .
-# ビルド時点ではDB接続不要（prisma generateはpostinstallで実行済み）
+# ビルド時点ではDB接続・実際のシークレットは不要（lib/env.tsの起動時検証を通すためのダミー値。
+# 実際の値はruntimeにcompose.yamlのenv_file経由で渡され、イメージには焼き込まれない）
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build_time_only"
+ENV AUTH_SECRET="build-time-placeholder-not-used-in-production-0000"
+ENV ADMIN_TOTP_ENCRYPTION_KEY="build-time-placeholder-not-used-in-production-0000"
 RUN npm run build
 
 FROM base AS runner
