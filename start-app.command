@@ -5,8 +5,19 @@
 
 cd "$(dirname "$0")"
 
+# ローカルにインストール済みのprismaを直接呼ぶ（npx経由だと別バージョンの
+# インストール確認プロンプトで無言のまま止まることがあるため）。
+PRISMA_BIN="./node_modules/.bin/prisma"
+
+if [ ! -x "$PRISMA_BIN" ]; then
+  echo "依存パッケージが見つかりません。先に npm install を実行してください。"
+  read -p "Enterキーで終了..."
+  exit 1
+fi
+
 echo "ローカルDBを起動しています..."
-npx prisma dev -d --name aaw-admin-dev >/tmp/aaw-admin-dbstart.log 2>&1
+# 対話プロンプトが出ても無言で固まらないよう標準入力を切り離す。
+"$PRISMA_BIN" dev -d --name aaw-admin-dev < /dev/null > /tmp/aaw-admin-dbstart.log 2>&1
 
 echo "起動を待っています..."
 sleep 3
