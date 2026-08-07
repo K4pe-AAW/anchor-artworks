@@ -47,9 +47,13 @@ npm run dev
 
 ### ローカル開発時の既知の注意点
 
-- `npx prisma dev` は軽量な開発用Postgresプロキシで、同時接続やprepared statementの扱いに弱い面がある。
-  `Can't reach database server` が出た場合は `npx prisma dev stop <name> && npx prisma dev -d --name <name>` で
-  再起動すれば復旧することが多い。本番はDocker Composeの実Postgresを使うため、この問題は発生しない。
+- `npx prisma dev` は軽量な開発用Postgresプロキシで、同時接続数の上限が実質10前後しかない。
+  `DATABASE_URL` の `connection_limit` は必ず5程度に抑えること（未指定だとPrisma Clientの
+  デフォルトプールサイズがCPUコア数依存で10を超え、`Can't reach database server` が頻発する）。
+  それでも `Can't reach database server` が出た場合は `./node_modules/.bin/prisma dev stop <name> && ./node_modules/.bin/prisma dev -d --name <name>` で
+  再起動すれば復旧することが多い（`npx prisma` は別バージョンのインストール確認プロンプトで
+  無言のまま固まることがあるため、`npx` ではなくローカルの実行ファイルを直接呼ぶこと）。
+  本番はDocker Composeの実Postgresを使うため、この問題は発生しない。
 - Next.js 16では `middleware.ts` が `proxy.ts` に名称変更されている。ファイル名・エクスポート名を
   `middleware` に戻さないこと（`proxy` という名前でエクスポートする）。
 
