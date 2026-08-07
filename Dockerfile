@@ -10,6 +10,7 @@ RUN npm ci
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/src/generated ./src/generated
 COPY . .
 # ビルド時点ではDB接続不要（prisma generateはpostinstallで実行済み）
 RUN npm run build
