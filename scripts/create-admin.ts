@@ -5,7 +5,6 @@
  */
 import "dotenv/config";
 import { createInterface } from "node:readline/promises";
-import { execSync } from "node:child_process";
 import qrcode from "qrcode";
 import { PrismaClient } from "../src/generated/prisma/client";
 import { hashPassword } from "../src/lib/password";
@@ -18,47 +17,49 @@ const BACKSPACE_CODES = new Set([8, 127]); // \b, DEL
 const CTRL_C_CODE = 3;
 const CTRL_D_CODE = 4;
 
+/**
+ * Node標準のraw modeでパスワード入力を隠す（外部stty依存なし）。
+ * TTYとして認識できない環境（IDE内蔵ターミナル等）では、隠せない旨を警告した上で通常入力にフォールバックする。
+ */
 function readHidden(promptText: string): Promise<string> {
   return new Promise((resolve) => {
-    process.stdout.write(promptText);
-    try {
-      execSync("stty -echo");
-    } catch {
-      // stty が使えない環境（非TTY等）では通常入力にフォールバック
+    const stdin = process.stdin;
+
+    if (!stdin.isTTY) {
+      console.log(
+        "\n⚠ このターミナルでは入力を非表示にできません（TTYとして検出されませんでした）。" +
+          "入力した文字がそのまま画面に表示されます。可能であればmacOSの「ターミナル」アプリで直接実行してください。\n",
+      );
+      const rl = createInterface({ input: stdin, output: process.stdout });
+      rl.question(promptText).then((answer) => {
+        rl.close();
+        resolve(answer.trim());
+      });
+      return;
     }
 
-    const restoreEcho = () => {
-      try {
-        execSync("stty echo");
-      } catch {
-        // noop
-      }
-    };
+    process.stdout.write(promptText);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
 
     let input = "";
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
+    const finish = (value: string) => {
+      stdin.removeListener("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stdout.write("\n");
+      resolve(value.trim());
+    };
 
     const onData = (chunk: string) => {
       const code = chunk.charCodeAt(0);
-      if (chunk.length === 1 && ENTER_CODES.has(code)) {
-        process.stdin.removeListener("data", onData);
-        restoreEcho();
-        process.stdout.write("\n");
-        process.stdin.pause();
-        resolve(input.trim());
-        return;
-      }
-      if (chunk.length === 1 && code === CTRL_D_CODE) {
-        process.stdin.removeListener("data", onData);
-        restoreEcho();
-        process.stdout.write("\n");
-        process.stdin.pause();
-        resolve(input.trim());
+      if (chunk.length === 1 && (ENTER_CODES.has(code) || code === CTRL_D_CODE)) {
+        finish(input);
         return;
       }
       if (chunk.length === 1 && code === CTRL_C_CODE) {
-        restoreEcho();
+        stdin.setRawMode(false);
         process.stdout.write("\n");
         process.exit(1);
       }
@@ -69,7 +70,7 @@ function readHidden(promptText: string): Promise<string> {
       input += chunk;
     };
 
-    process.stdin.on("data", onData);
+    stdin.on("data", onData);
   });
 }
 
