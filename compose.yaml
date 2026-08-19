@@ -24,7 +24,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-aaw_admin}
     volumes:
       - db-data:/var/lib/postgresql/data
-    # 本番では外部公開しない（127.0.0.1限定でデバッグ用に開けたい場合のみ有効化）
+    # ローカル単独運用のため127.0.0.1限定で公開し、next devから直接繋げるようにしている。
+    # 本番相当のリモートサーバーで使う場合はこのportsをコメントアウトすること。
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aaw_admin}"]
       interval: 10s
